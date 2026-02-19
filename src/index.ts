@@ -1,11 +1,14 @@
 #!/usr/bin/env node
+import { createServer } from "node:http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "node:crypto";
 import { log } from "./utils/helpers.js";
 import { version } from "./utils/version.js";
 import { ACCOUNT_HANDLERS, ACCOUNT_TOOLS } from "./tools/account/index.js";
@@ -55,48 +58,118 @@ const ALL_HANDLERS = {
   ...DATABASES_ESSENTIALS_HANDLERS,
 };
 
-const server = new Server(
-  { name: "mcp-redis-cloud", version },
-  { capabilities: { tools: {} } },
-);
+function createMcpServer() {
+  const server = new Server(
+    { name: "mcp-redis-cloud", version },
+    { capabilities: { tools: {} } },
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-  log("Received list tools request");
-  return { tools: ALL_TOOLS };
-});
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    log("Received list tools request");
+    return { tools: ALL_TOOLS };
+  });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const toolName = request.params.name;
-  log("Received tool call:", toolName);
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const toolName = request.params.name;
+    log("Received tool call:", toolName);
 
-  try {
-    const handler = ALL_HANDLERS[toolName];
-    if (!handler) {
-      throw new Error(`Unknown tool: ${toolName}`);
+    try {
+      const handler = ALL_HANDLERS[toolName];
+      if (!handler) {
+        throw new Error(`Unknown tool: ${toolName}`);
+      }
+      return await handler(request);
+    } catch (error) {
+      log("Error handling tool call:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          },
+        ],
+        isError: true,
+      };
     }
-    return await handler(request);
-  } catch (error) {
-    log("Error handling tool call:", error);
-    return {
-      content: [
-        {
-          type: "text",
-          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-        },
-      ],
-      isError: true,
-    };
-  }
-});
+  });
+
+  return server;
+}
+
+async function startHttpTransport() {
+  const PORT = parseInt(process.env.PORT || "3000", 10);
+  const sessions = new Map<string, { transport: StreamableHTTPServerTransport; server: Server }>();
+
+  const httpServer = createServer(async (req, res) => {
+    const url = new URL(req.url || "", `http://localhost:${PORT}`);
+    const pathname = url.pathname.replace(/\/+$/, "") || "/";
+
+    if (pathname === "/mcp") {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      let session = sessionId ? sessions.get(sessionId) : undefined;
+
+      if (!session && req.method === "POST") {
+        log("New Streamable HTTP session");
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+        });
+        const server = createMcpServer();
+        await server.connect(transport);
+
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid) {
+            sessions.delete(sid);
+            log(`Session ${sid} closed`);
+          }
+        };
+
+        await transport.handleRequest(req, res);
+
+        const sid = transport.sessionId;
+        if (sid) {
+          sessions.set(sid, { transport, server });
+        }
+        return;
+      }
+
+      if (session) {
+        await session.transport.handleRequest(req, res);
+        return;
+      }
+
+      res.writeHead(400).end("Invalid or missing session");
+    } else if (pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+    } else {
+      res.writeHead(404).end("Not found");
+    }
+  });
+
+  httpServer.listen(PORT, () => {
+    log(`Streamable HTTP transport listening on port ${PORT}`);
+  });
+}
+
+async function startStdioTransport() {
+  const server = createMcpServer();
+  const transport = new StdioServerTransport();
+  log("Created transport");
+  await server.connect(transport);
+  log("Server connected and running");
+}
 
 export async function main() {
-  log("Starting server...");
+  const transportType = process.env.TRANSPORT || "stdio";
+  log(`Starting server with ${transportType} transport...`);
 
   try {
-    const transport = new StdioServerTransport();
-    log("Created transport");
-    await server.connect(transport);
-    log("Server connected and running");
+    if (transportType === "http") {
+      await startHttpTransport();
+    } else {
+      await startStdioTransport();
+    }
   } catch (error) {
     log("Fatal error:", error);
     process.exit(1);

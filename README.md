@@ -173,17 +173,34 @@ Note: If you make changes to your code, remember to rebuild and restart Claude D
 npm run build
 ```
 
+## Transport Modes
+
+The server supports two transport modes, controlled by the `TRANSPORT` environment variable:
+
+- **`stdio`** (default) — Communicates over stdin/stdout. Used by local MCP clients like Claude Desktop and Cursor.
+- **`http`** — Starts an HTTP server using the [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport. Used for remote/cloud deployments (e.g., Kubernetes).
+
+When running in HTTP mode, the server exposes:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/mcp` | POST | Streamable HTTP endpoint (initialize, tool calls, etc.) |
+| `/mcp` | GET | Optional SSE stream for server-initiated notifications |
+| `/health` | GET | Health check (returns `{"status":"ok"}`) |
+
+Sessions are identified by the `Mcp-Session-Id` header returned on initialization.
+
+The port defaults to `3000` and can be overridden with the `PORT` environment variable.
+
 ## Docker Usage
 
 ### Building the Docker Image
-To build the Docker image for the MCP server, run the following command:
 
 ```bash
 docker build -t mcp/redis-cloud .
 ```
 
-### Running the Docker Container
-To run the container, use the following command:
+### Running with stdio (local)
 
 ```bash
 docker run -i --rm \
@@ -192,9 +209,20 @@ docker run -i --rm \
   mcp/redis-cloud
 ```
 
-### Docker Integration with Claude Desktop
+### Running with HTTP transport (remote/Kubernetes)
 
-To integrate the Dockerized MCP server with Claude Desktop, follow these steps:
+```bash
+docker run -d --rm \
+  -p 3000:3000 \
+  -e TRANSPORT=http \
+  -e API_KEY=<your_redis_cloud_api_key> \
+  -e SECRET_KEY=<your_redis_cloud_api_secret_key> \
+  mcp/redis-cloud
+```
+
+MCP clients can then connect to `http://localhost:3000/mcp`.
+
+### Docker Integration with Claude Desktop
 
 1. Build the Docker image (if you haven't already):
    ```bash
@@ -232,6 +260,14 @@ To integrate the Dockerized MCP server with Claude Desktop, follow these steps:
 
 4. Save the configuration file and restart Claude Desktop.
 
+### Kubernetes Deployment
+
+When deploying to Kubernetes, make sure to:
+
+1. Set the `TRANSPORT` environment variable to `http` (via a ConfigMap, env field, etc.).
+2. Expose port `3000` (or your custom `PORT`) on the container.
+3. Configure liveness and readiness probes against `GET /health` on port `3000`.
 
 ### Notes
 - Ensure that the required environment variables (`API_KEY`, `SECRET_KEY`) are set correctly.
+- When using HTTP transport, each client initialization creates its own MCP server session.

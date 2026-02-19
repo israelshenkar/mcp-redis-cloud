@@ -161,7 +161,7 @@ const databaseCreateRequestSchema = z.object({
     .array(
       z.object({
         name: z.string(),
-        parameters: z.record(z.record(z.any())).optional(),
+        parameters: z.record(z.string(), z.record(z.string(), z.any())).optional(),
       }),
     )
     .optional(),
